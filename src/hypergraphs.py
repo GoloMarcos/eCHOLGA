@@ -34,7 +34,7 @@ class Hypergraph(object):
             self.hypergraph.nodes['event:' + row[self.cause_col]]['embedding'] = cause_emb
             self.hypergraph.nodes['event:' + row[self.effect_col]]['embedding'] = effect_emb
             self.hypergraph.nodes['relation: ' + row[self.cause_col] + '_' + row[self.effect_col]]['embedding'] = np.mean([cause_emb,effect_emb], axis=0)
-
+    
     def generate_kfold_graphs(self):
         df_egae = pd.DataFrame()
         df_egae['y'] = [self.hypergraph.nodes[node]['label'] for node in self.hypergraph.nodes()]
@@ -65,6 +65,13 @@ class Hypergraph(object):
 
             graphs_kfold.append(g_aux)
         return graphs_kfold
+
+    def _generate_node_to_index(self):
+        index = 0
+        node_to_index = {}
+        for node in self.hypergraph.nodes():
+            node_to_index[node] = index
+            index+=1 
 
 class HeterogeneousHyperGraph(Hypergraph):
     def __init__(self, cause_col, effect_col, dataframe, model, dic_who, dic_when, dic_where):
@@ -117,6 +124,20 @@ class HeterogeneousHyperGraph(Hypergraph):
                     self.hypergraph.add_edge('when:' + we,'event:' + row[self.effect_col])
             except: g = 1
     
+    def add_relation_edges(self):
+        index_to_node = {}
+        embeddings_relation = []
+        count = 0
+        for node in self.hypergraph.nodes():
+            if 'relation:' in node:
+                embeddings_relation.append(self.hypergraph.nodes[node]['embedding'])
+                index_to_node[count] = node
+                count+=1
+        
+        # to do
+        # grafo knn com embeddings_relation
+        # pegar as conexões e adicionar no grafo com o index_to_node
+
     def add_secundary_node_labels(self):
         for node in self.hypergraph.nodes():
             if 'relation:' not in node and 'event:' not in node: self.hypergraph.nodes[node]['label'] = 'aux'
