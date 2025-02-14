@@ -46,10 +46,10 @@ def show_graph(G):
       marker=dict(
           size=10,
           line_width=2))
-  
+
   node_labels = []
   for node in G.nodes():
-    node_labels.append(G.nodes[node]['label'])
+    node_labels.append(G.nodes[node]['node_type'])
 
   node_trace.marker.color = node_labels
   

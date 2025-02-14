@@ -1,5 +1,5 @@
 import torch
-from torch_geometric.nn import HGTConv, GCNConv
+from torch_geometric.nn import HGTConv, GCNConv, GATv2Conv, FAConv
 import torch.nn as nn
 import numpy as np
 from torch_geometric.utils.convert import from_networkx
@@ -10,8 +10,8 @@ class Encoder_eCHOLGA(torch.nn.Module):
     def __init__(self, input_len, dim, num_node_types, dataHetero):
         super(Encoder_eCHOLGA, self).__init__()
         self.data = dataHetero
-        self.conv1 = HGTConv(input_len, 128, self.data.get_data().metadata())
-        self.conv2 = HGTConv(128, dim, self.data.get_data().metadata())
+        self.conv1 = HGTConv(input_len, 256, self.data.get_data().metadata())
+        self.conv2 = HGTConv(256, dim, self.data.get_data().metadata())
         self.encoder_layer_3 = nn.Linear(dim, num_node_types)
     def forward(self, x_dict, edge_index_dict):
         x_dict1 = self.conv1(x_dict, edge_index_dict)
@@ -27,14 +27,20 @@ class Encoder_eCOLGCN(torch.nn.Module):
         self.data = dataHetero
         self.conv1 = GCNConv(input_len, 128)
         self.conv2 = GCNConv(128, dim)
+        # self.conv1 = GATv2Conv(input_len, 256, heads=4, concat=False)
+        # self.conv2 = GATv2Conv(256, dim, heads=4, concat=False)
+        # self.conv1 = FAConv(channels=input_len, eps=0.3, dropout=0.1, cached=True)
+        # self.conv2 = FAConv(channels=input_len, eps=0.3, dropout=0.1, cached=True)
+        # self.conv2_1 = nn.Linear(input_len, dim)
         self.encoder_layer_3 = nn.Linear(dim, num_node_types)
-    def forward(self, x_dict, edge_index_dict):
-        x_dict1 = nn.Tanh()(self.conv1(x_dict, edge_index_dict))
-        x_dict2 = nn.Tanh()(self.conv2(x_dict1, edge_index_dict))
-        return x_dict2, self.encoder_layer_3(x_dict2)
+    def forward(self, x, edge_index):
+        x1 = nn.Tanh()(self.conv1(x, edge_index))
+        x2 = nn.Tanh()(self.conv2(x1, edge_index))
+        #x2 = nn.Tanh()(self.conv2_1(x2))
+        return x2, self.encoder_layer_3(x2)
 
 class HeterogeneousGNNModel(object):
-    def __init__(self, device, lr, radius_value, dim, num_node_types, dataHetero, graph, embedding_len):
+    def __init__(self, device, lr, radius_value, dim, num_node_types, graph, embedding_len, dataHetero=None):
         self.device = torch.device(device)
         self.learning_rate = lr
         self.radius_value = radius_value
@@ -44,31 +50,49 @@ class HeterogeneousGNNModel(object):
         self.graph = graph
         self.embedding_len = embedding_len
         self.graph_torch = from_networkx(self.graph).to(self.device)
-        #self.model = GAE(Encoder_eCHOLGA(self.embedding_len, self.learned_dimension, self.num_node_types, self.dataHetero)).to(self.device)
-        self.model = GAE(Encoder_eCOLGCN(self.embedding_len, self.learned_dimension, self.num_node_types, self.dataHetero)).to(self.device)
+        if dataHetero != None:
+            self.model = GAE(Encoder_eCHOLGA(self.embedding_len, self.learned_dimension, self.num_node_types, self.dataHetero)).to(self.device)
+        else:
+            self.model = GAE(Encoder_eCOLGCN(self.embedding_len, self.learned_dimension, self.num_node_types, self.dataHetero)).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         self.center = torch.Tensor([0] * self.learned_dimension).to(self.device)
         self.radius = torch.Tensor([self.radius_value]).to(self.device)
-        self.mask, self.unsup_mask, unsup_nodes = self._one_class_masking()
-        g_unsup = self.graph.subgraph(unsup_nodes)
-        self.graph_torch_unsup = from_networkx(g_unsup).to(self.device)
+        self.mask = self._train_masking()
 
-    def _one_class_masking(self):
+    def _train_masking(self):
         train_mask = np.zeros(len(self.graph.nodes), dtype='bool')
-        unsup_mask = np.zeros(len(self.graph.nodes), dtype='bool')
-        normal_train_idx, unsup_idx, unsup = [], [], []
-        count = 0
+        normal_train_idx, count = [], 0 
         for node in self.graph.nodes():
-            if self.graph.nodes[node]['train'] == 1:
-                normal_train_idx.append(count)
-            else:
-                unsup_idx.append(count)
-                unsup.append(node)
+            if self.graph.nodes[node]['train'] == 1: normal_train_idx.append(count)
             count += 1
         train_mask[normal_train_idx] = 1
+        return train_mask
+    
+    def _unsupervised_masking(self, condition):
+        unsup_mask = np.zeros(len(self.graph.nodes), dtype='bool')
+        unsup_idx, unsup_nodes, count = [], [], 0 
+        for node in self.graph.nodes():
+            if condition == 'unsup_general' and self.graph.nodes[node]['train'] != 1:
+                unsup_idx.append(count)
+                unsup_nodes.append(node)
+            elif condition == 'unsup_relation' and 'relation:' in node and self.graph.nodes[node]['train'] != 1:
+                unsup_idx.append(count)
+                unsup_nodes.append(node)
+            elif condition == 'relation' and 'relation:' in node:
+                unsup_idx.append(count)
+                unsup_nodes.append(node)
+            count+=1
         unsup_mask[unsup_idx] = 1
+        return unsup_mask, unsup_nodes
 
-        return train_mask, unsup_mask, unsup
+    def return_unsup_mask(self, condition):
+        unsup_mask, _ = self._unsupervised_masking(condition)
+        return unsup_mask
+    
+    def return_graph_torch_unsup(self, condition):
+        _, unsup_nodes = self._unsupervised_masking(condition)
+        g_unsup = self.graph.subgraph(unsup_nodes)
+        return from_networkx(g_unsup).to(self.device)
     
     def get_device(self):
         return self.device
@@ -92,11 +116,7 @@ class HeterogeneousGNNModel(object):
         return self.radius
     def get_mask(self):
         return self.mask
-    def get_unsup_mask(self):
-        return self.unsup_mask
-    def get_graph_torch_unsup(self):
-        return self.graph_torch_unsup
-
+    
     def one_class_homogeneousGNN_prediction(self, learned_representations, node_to_index, dic):
         with torch.no_grad():
             interest, outlier = [], []

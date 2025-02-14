@@ -2,6 +2,10 @@ import numpy as np
 import networkx as nx
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
+from sklearn.neighbors import kneighbors_graph
+from scipy.spatial.distance import cosine
+from sklearn.cluster import KMeans
+from src.consensus import Consensus
 
 class Hypergraph(object):
     def __init__(self, cause_col, effect_col, dataframe, model):
@@ -10,30 +14,23 @@ class Hypergraph(object):
         self.effect_col = effect_col
         self.dataframe = dataframe
         self.embedding_model = model
-
         self.dataframe[cause_col] = self.dataframe[cause_col].astype(str)
         self.dataframe[effect_col] = self.dataframe[effect_col].astype(str)
-        self.dataframe['Embedding_' + cause_col] = list(model.encode(self.dataframe[cause_col]))
-        self.dataframe['Embedding_' + effect_col] = list(model.encode(self.dataframe[effect_col]))
-    
+
     def add_main_edges(self):
         for _, row in self.dataframe.iterrows():
-            self.hypergraph.add_edge('event:' + row[self.cause_col], 'relation: ' + row[self.cause_col] + '_' + row[self.effect_col])
-            self.hypergraph.add_edge('relation: ' + row[self.cause_col] + '_' + row[self.effect_col], 'event:' + row[self.effect_col])
+            self.hypergraph.add_edge('event:' + row[self.cause_col], 'relation: First event: - ' + row[self.cause_col] + ' || Second event: - ' + row[self.effect_col])
+            self.hypergraph.add_edge('relation: First event: - ' + row[self.cause_col] + ' || Second event: - ' + row[self.effect_col], 'event:' + row[self.effect_col])
 
     def add_main_node_labels(self):
         for _, row in self.dataframe.iterrows():
             self.hypergraph.nodes['event:' + row[self.cause_col]]['label'] = 'aux'
             self.hypergraph.nodes['event:' + row[self.effect_col]]['label'] = 'aux'
-            self.hypergraph.nodes['relation: ' + row[self.cause_col] + '_' + row[self.effect_col]]['label'] = row['Label']
+            self.hypergraph.nodes['relation: First event: - ' + row[self.cause_col] + ' || Second event: - ' + row[self.effect_col]]['label'] = row['Label']
     
     def add_main_node_embeddings(self):
-        for _, row in self.dataframe.iterrows():
-            cause_emb = np.asarray(row['Embedding_' + self.cause_col], dtype=np.float64)
-            effect_emb = np.asarray(row['Embedding_' + self.effect_col], dtype=np.float64)
-            self.hypergraph.nodes['event:' + row[self.cause_col]]['embedding'] = cause_emb
-            self.hypergraph.nodes['event:' + row[self.effect_col]]['embedding'] = effect_emb
-            self.hypergraph.nodes['relation: ' + row[self.cause_col] + '_' + row[self.effect_col]]['embedding'] = np.mean([cause_emb,effect_emb], axis=0)
+        for node in self.hypergraph.nodes():
+            self.hypergraph.nodes[node]['embedding'] = np.asarray(self.embedding_model.encode(node), dtype=np.float64)
     
     def generate_kfold_graphs(self):
         df_egae = pd.DataFrame()
@@ -53,9 +50,9 @@ class Hypergraph(object):
             nodes_test = df[df.index.isin(test_index)]['node'].to_list()
             
             dict_train_test = {'train': [nodes_train,[1,0,0]],
-                               'test': [nodes_test,[0,1,0]],
-                               'out': [nodes_out,[0,0,1]],
-                               'aux': [nodes_aux,[0,0,1]]}
+                               'test':  [nodes_test, [0,1,0]],
+                               'out':   [nodes_out,  [0,0,1]],
+                               'aux':   [nodes_aux,  [0,0,1]]}
 
             for key in dict_train_test.keys():
                 for node in dict_train_test[key][0]:
@@ -74,9 +71,9 @@ class Hypergraph(object):
             index+=1 
 
 class HeterogeneousHyperGraph(Hypergraph):
-    def __init__(self, cause_col, effect_col, dataframe, model, dic_who, dic_when, dic_where):
+    def __init__(self, cause_col, effect_col, dataframe, model, dic_who, dic_when, dic_where, dataset):
         super().__init__(cause_col, effect_col, dataframe, model) 
-
+        self.dataset_name = dataset
         self.dic_who = dic_who
         self.dic_when = dic_when
         self.dic_where = dic_where
@@ -124,19 +121,115 @@ class HeterogeneousHyperGraph(Hypergraph):
                     self.hypergraph.add_edge('when:' + we,'event:' + row[self.effect_col])
             except: g = 1
     
-    def add_relation_edges(self):
-        index_to_node = {}
-        embeddings_relation = []
-        count = 0
-        for node in self.hypergraph.nodes():
+    def _get_most_similar_embedding(self, emb, embeddings, ids):
+        menor = 1
+        for i in range(len(embeddings)):
+            if i in ids: continue
+            c = cosine(emb, embeddings[i])
+            if c < menor:
+                menor = c
+                index = i
+        return index    
+    
+    def add_relation_edges(self, k, graph_fold, llms):
+        index_to_node_train, index_to_node_test = {}, {}
+        count_train, count_test = 0, 0
+        embeddings_relation_train, embeddings_relation_test  = [], []
+        for node in graph_fold.nodes():
             if 'relation:' in node:
-                embeddings_relation.append(self.hypergraph.nodes[node]['embedding'])
-                index_to_node[count] = node
-                count+=1
+                if graph_fold.nodes[node]['train'] == 1:
+                    embeddings_relation_train.append(graph_fold.nodes[node]['embedding'])
+                    index_to_node_train[count_train] = node
+                    count_train+=1
+                elif graph_fold.nodes[node]['test'] == 1:
+                    embeddings_relation_test.append(graph_fold.nodes[node]['embedding'])
+                    index_to_node_test[count_test] = node
+                    count_test+=1
         
-        # to do
-        # grafo knn com embeddings_relation
-        # pegar as conexões e adicionar no grafo com o index_to_node
+        A = kneighbors_graph(embeddings_relation_train, n_neighbors=k, metric='cosine', mode='connectivity', include_self=False).toarray() 
+        for i in range(len(A)):
+            for j in range(len(A)):
+                if A[i][j] > 0:
+                    graph_fold.add_edge(index_to_node_train[i],index_to_node_train[j])
+                    graph_fold.add_edge(index_to_node_train[j],index_to_node_train[i])
+        
+        con = Consensus(llms, self.dataset_name)
+        real_class_consensus, real_class_w_con, classes_consensus = [], [], []
+        for i in range(len(embeddings_relation_test)):                    
+            llm_ckasses = con.generate_consensus(index_to_node_test[i])
+            if len(llm_ckasses) == 1:
+                if llm_ckasses[0] == 'causal':
+                    classes_consensus.append(llm_ckasses[0])
+                    real_class_consensus.append(graph_fold.nodes[index_to_node_test[i]]['label'])
+                    l_out = [-1]
+                    while len(l_out) < k:
+                        index_most_similar = self._get_most_similar_embedding(embeddings_relation_test[i], embeddings_relation_train, l_out)
+                        l_out.append(index_most_similar)
+                        graph_fold.add_edge(index_to_node_test[i],index_to_node_train[index_most_similar])
+                        graph_fold.add_edge(index_to_node_train[index_most_similar],index_to_node_test[i])
+                if llm_ckasses[0] == 'non_causal':
+                    classes_consensus.append(llm_ckasses[0])
+                    real_class_consensus.append(graph_fold.nodes[index_to_node_test[i]]['label'])
+                    l_out = [i]
+                    l_in = []
+                    while len(l_in) < k-1:
+                        j = self._get_most_similar_embedding(embeddings_relation_test[i], embeddings_relation_test, l_out)
+                        llm_classes2 = con.generate_consensus(index_to_node_test[j])
+                        if len(llm_classes2) == 1 and llm_classes2[0] == 'non_causal':
+                            l_in.append(j)
+                            graph_fold.add_edge(index_to_node_test[i],index_to_node_test[j])
+                            graph_fold.add_edge(index_to_node_test[j],index_to_node_test[i])
+                        l_out.append(j)
+            else:
+                real_class_w_con.append(graph_fold.nodes[index_to_node_test[i]]['label'])
+        
+        return real_class_consensus, classes_consensus, real_class_w_con
+
+    def add_relation_edges_ROUBO(self, k, metric, graph_fold):
+        index_to_node_train, index_to_node_test_int, index_to_node_test_out = {}, {}, {}
+        count_train, count_test_int, count_test_out = 0, 0, 0
+        embeddings_relation_train, embeddings_relation_test_int, embeddings_relation_test_out  = [], [], []
+        for node in graph_fold.nodes():
+            if 'relation:' in node:
+                if graph_fold.nodes[node]['train'] == 1:
+                    embeddings_relation_train.append(graph_fold.nodes[node]['embedding'])
+                    index_to_node_train[count_train] = node
+                    count_train+=1
+                elif graph_fold.nodes[node]['train'] == 0 and graph_fold.nodes[node]['label'] != 'causal':
+                    embeddings_relation_test_out.append(graph_fold.nodes[node]['embedding'])
+                    index_to_node_test_out[count_test_out] = node
+                    count_test_out+=1
+                elif graph_fold.nodes[node]['train'] == 0 and graph_fold.nodes[node]['label'] == 'causal':
+                    embeddings_relation_test_int.append(graph_fold.nodes[node]['embedding'])
+                    index_to_node_test_int[count_test_int] = node
+                    count_test_int+=1
+        A = kneighbors_graph(embeddings_relation_train, n_neighbors=k, metric=metric, mode='connectivity', include_self=False).toarray() 
+        for i in range(len(A)):
+            for j in range(len(A)):
+                if A[i][j] == 1:
+                    graph_fold.add_edge(index_to_node_train[i],index_to_node_train[j])
+                    graph_fold.add_edge(index_to_node_train[j],index_to_node_train[i])
+        for i in range(len(embeddings_relation_test_out)):
+            index_most_similar = self._get_most_similar_embedding(embeddings_relation_test_out[i], embeddings_relation_test_out, [i])
+            index_most_similar2 = self._get_most_similar_embedding(embeddings_relation_test_out[i], embeddings_relation_test_out, [i,index_most_similar])
+            index_most_similar3 = self._get_most_similar_embedding(embeddings_relation_test_out[i], embeddings_relation_test_out, [i,index_most_similar,index_most_similar2])
+            graph_fold.add_edge(index_to_node_test_out[i],index_to_node_test_out[index_most_similar])
+            graph_fold.add_edge(index_to_node_test_out[index_most_similar],index_to_node_test_out[i])
+            graph_fold.add_edge(index_to_node_test_out[i],index_to_node_test_out[index_most_similar2])
+            graph_fold.add_edge(index_to_node_test_out[index_most_similar2],index_to_node_test_out[i])
+            graph_fold.add_edge(index_to_node_test_out[i],index_to_node_test_out[index_most_similar3])
+            graph_fold.add_edge(index_to_node_test_out[index_most_similar3],index_to_node_test_out[i])
+        
+        for i in range(len(embeddings_relation_test_int)):
+            index_most_similar = self._get_most_similar_embedding(embeddings_relation_test_int[i], embeddings_relation_train, [-1])
+            index_most_similar2 = self._get_most_similar_embedding(embeddings_relation_test_int[i], embeddings_relation_train, [index_most_similar])
+            index_most_similar3 = self._get_most_similar_embedding(embeddings_relation_test_int[i], embeddings_relation_train, [index_most_similar,index_most_similar2])
+            graph_fold.add_edge(index_to_node_test_int[i],index_to_node_train[index_most_similar])
+            graph_fold.add_edge(index_to_node_train[index_most_similar],index_to_node_test_int[i])
+            graph_fold.add_edge(index_to_node_test_int[i],index_to_node_train[index_most_similar2])
+            graph_fold.add_edge(index_to_node_train[index_most_similar2],index_to_node_test_int[i])
+            graph_fold.add_edge(index_to_node_test_int[i],index_to_node_train[index_most_similar3])
+            graph_fold.add_edge(index_to_node_train[index_most_similar3],index_to_node_test_int[i])
 
     def add_secundary_node_labels(self):
         for node in self.hypergraph.nodes():
@@ -145,8 +238,8 @@ class HeterogeneousHyperGraph(Hypergraph):
             if 'relation:' in node: self.hypergraph.nodes[node]['node_type'] = 1
             if 'topic:' in node: self.hypergraph.nodes[node]['node_type'] = 2
             if 'who:' in node: self.hypergraph.nodes[node]['node_type'] = 3
-            if 'when:' in node: self.hypergraph.nodes[node]['node_type'] = 4
-            if 'where:' in node: self.hypergraph.nodes[node]['node_type'] = 5
+            if 'where:' in node: self.hypergraph.nodes[node]['node_type'] = 4
+            if 'when:' in node: self.hypergraph.nodes[node]['node_type'] = 5
     
     def add_secundary_node_embeddings(self):
         for node in self.hypergraph.nodes():
