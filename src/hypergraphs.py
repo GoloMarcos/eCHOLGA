@@ -5,7 +5,8 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.neighbors import kneighbors_graph
 from scipy.spatial.distance import cosine
 from sklearn.cluster import KMeans
-from src.consensus import Consensus
+from src.consensus import Consensus, LLM_Heterogeneous_Graph_Information
+import json
 
 class Hypergraph(object):
     def __init__(self, cause_col, effect_col, dataframe, model):
@@ -19,14 +20,14 @@ class Hypergraph(object):
 
     def add_main_edges(self):
         for _, row in self.dataframe.iterrows():
-            self.hypergraph.add_edge('event:' + row[self.cause_col], 'relation: First event: - ' + row[self.cause_col] + ' || Second event: - ' + row[self.effect_col])
-            self.hypergraph.add_edge('relation: First event: - ' + row[self.cause_col] + ' || Second event: - ' + row[self.effect_col], 'event:' + row[self.effect_col])
+            self.hypergraph.add_edge('event:' + row[self.cause_col], 'relation: First event - ' + row[self.cause_col] + ' || Second event - ' + row[self.effect_col])
+            self.hypergraph.add_edge('relation: First event - ' + row[self.cause_col] + ' || Second event - ' + row[self.effect_col], 'event:' + row[self.effect_col])
 
     def add_main_node_labels(self):
         for _, row in self.dataframe.iterrows():
             self.hypergraph.nodes['event:' + row[self.cause_col]]['label'] = 'aux'
             self.hypergraph.nodes['event:' + row[self.effect_col]]['label'] = 'aux'
-            self.hypergraph.nodes['relation: First event: - ' + row[self.cause_col] + ' || Second event: - ' + row[self.effect_col]]['label'] = row['Label']
+            self.hypergraph.nodes['relation: First event - ' + row[self.cause_col] + ' || Second event - ' + row[self.effect_col]]['label'] = row['Label']
     
     def add_main_node_embeddings(self):
         for node in self.hypergraph.nodes():
@@ -131,7 +132,28 @@ class HeterogeneousHyperGraph(Hypergraph):
                 index = i
         return index    
     
-    def add_relation_edges(self, k, graph_fold, llms):
+    def _aux_pseudo_label_relations(self, neighbor4, r, nr, g_obs, con):
+        if 'relation:' in neighbor4:
+            if g_obs.nodes[neighbor4]['train'] == 1:
+                r+=5
+            else:
+                llm_ckasses = con.generate_consensus(neighbor4)
+                if len(llm_ckasses) == 1 and llm_ckasses[0] == 'causal':
+                    r+=1
+                elif len(llm_ckasses) == 1 and llm_ckasses[0] == 'non_causal':
+                    nr+=1
+    
+        return r, nr
+    
+    def _pseudo_label_relations(self, neighbor2, g_obs, con):
+        r, nr = 0, 0
+        for neighbor3 in g_obs.neighbors(neighbor2):
+            if 'event:' in neighbor3:
+                for neighbor4 in g_obs.neighbors(neighbor3):
+                    r, nr = self._aux_pseudo_label_relations(neighbor4, r, nr, g_obs, con)
+        return r, nr
+
+    def _add_train_relation_edges(self, k, graph_fold):
         index_to_node_train, index_to_node_test = {}, {}
         count_train, count_test = 0, 0
         embeddings_relation_train, embeddings_relation_test  = [], []
@@ -152,38 +174,59 @@ class HeterogeneousHyperGraph(Hypergraph):
                 if A[i][j] > 0:
                     graph_fold.add_edge(index_to_node_train[i],index_to_node_train[j])
                     graph_fold.add_edge(index_to_node_train[j],index_to_node_train[i])
-        
-        con = Consensus(llms, self.dataset_name)
-        real_class_consensus, real_class_w_con, classes_consensus = [], [], []
-        for i in range(len(embeddings_relation_test)):                    
-            llm_ckasses = con.generate_consensus(index_to_node_test[i])
-            if len(llm_ckasses) == 1:
-                if llm_ckasses[0] == 'causal':
-                    classes_consensus.append(llm_ckasses[0])
+
+        return index_to_node_train, index_to_node_test, embeddings_relation_train, embeddings_relation_test
+
+    def _connect_to_train_edges(self, i, k, graph_fold, index_to_node_test, index_to_node_train, embeddings_relation_test, embeddings_relation_train):
+        l_out = [-1]
+        while len(l_out) < k:
+            index_most_similar = self._get_most_similar_embedding(embeddings_relation_test[i], embeddings_relation_train, l_out)
+            l_out.append(index_most_similar)
+            graph_fold.add_edge(index_to_node_test[i], index_to_node_train[index_most_similar])
+            graph_fold.add_edge(index_to_node_train[index_most_similar],index_to_node_test[i])        
+
+    def _cennect_to_test_edges(self, i, k, graph_fold, index_to_node_test, embeddings_relation_test, con):
+        l_out = [i]
+        l_in = []
+        while len(l_in) < k-1:
+            j = self._get_most_similar_embedding(embeddings_relation_test[i], embeddings_relation_test, l_out)
+            llm_classes = con[j]
+            if llm_classes == 'non_causal':
+                l_in.append(j)
+                graph_fold.add_edge(index_to_node_test[i],index_to_node_test[j])
+                graph_fold.add_edge(index_to_node_test[j],index_to_node_test[i])
+            l_out.append(j)
+
+    def add_relation_edges_llm(self, k, graph_fold, llm, system_prompt, user_prompt, final_user_prompt):
+        index_to_node_train, index_to_node_test, embeddings_relation_train, embeddings_relation_test = self._add_train_relation_edges(k, graph_fold)
+        llm_edges = LLM_Heterogeneous_Graph_Information(llm, self.dataset_name, graph_fold)
+        real_class_consensus, classes_consensus = [], []
+
+        for i in range(len(embeddings_relation_test)):
+            relation = index_to_node_test[i]
+            llm_edges.set_system_prompt(system_prompt)   
+            llm_edges.set_initial_user_prompt(user_prompt)   
+            llm_edges.set_final_user_prompt(final_user_prompt)
+            pseudo_label = llm_edges.get_pseudo_label(relation)
+            pseudo_label = pseudo_label.replace(pseudo_label[pseudo_label.find("<think>"):pseudo_label.find("</think>")+1], '').strip()
+            r = pseudo_label.replace('```json', '').replace('```', '').replace('[', '').replace(']', '').replace('/think>', '')
+            try:
+                json_obj = json.loads(r)
+                if json_obj['class'] == 'causal' or json_obj['class'] == 'non_causal': 
                     real_class_consensus.append(graph_fold.nodes[index_to_node_test[i]]['label'])
-                    l_out = [-1]
-                    while len(l_out) < k:
-                        index_most_similar = self._get_most_similar_embedding(embeddings_relation_test[i], embeddings_relation_train, l_out)
-                        l_out.append(index_most_similar)
-                        graph_fold.add_edge(index_to_node_test[i],index_to_node_train[index_most_similar])
-                        graph_fold.add_edge(index_to_node_train[index_most_similar],index_to_node_test[i])
-                if llm_ckasses[0] == 'non_causal':
-                    classes_consensus.append(llm_ckasses[0])
-                    real_class_consensus.append(graph_fold.nodes[index_to_node_test[i]]['label'])
-                    l_out = [i]
-                    l_in = []
-                    while len(l_in) < k-1:
-                        j = self._get_most_similar_embedding(embeddings_relation_test[i], embeddings_relation_test, l_out)
-                        llm_classes2 = con.generate_consensus(index_to_node_test[j])
-                        if len(llm_classes2) == 1 and llm_classes2[0] == 'non_causal':
-                            l_in.append(j)
-                            graph_fold.add_edge(index_to_node_test[i],index_to_node_test[j])
-                            graph_fold.add_edge(index_to_node_test[j],index_to_node_test[i])
-                        l_out.append(j)
-            else:
-                real_class_w_con.append(graph_fold.nodes[index_to_node_test[i]]['label'])
+                    classes_consensus.append(json_obj['class'])
+            except:
+                print(r)
+                print('--------------------------')
+                print(graph_fold.nodes[index_to_node_test[i]]['label'])
+
+        for i in range(len(embeddings_relation_test)):
+            if classes_consensus[i] == 'causal':
+                self._connect_to_train_edges(i, k, graph_fold, index_to_node_test, index_to_node_train, embeddings_relation_test, embeddings_relation_train)
+            elif classes_consensus[i] == 'non_causal':
+                self._cennect_to_test_edges(i, k, graph_fold, index_to_node_test, embeddings_relation_test, classes_consensus)
         
-        return real_class_consensus, classes_consensus, real_class_w_con
+        return real_class_consensus, classes_consensus
 
     def add_relation_edges_ROUBO(self, k, metric, graph_fold):
         index_to_node_train, index_to_node_test_int, index_to_node_test_out = {}, {}, {}
