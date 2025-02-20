@@ -1,6 +1,8 @@
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 from plotly import graph_objs as go
+import numpy as np
+from pathlib import Path
 
 def show_graph(G):
   ### ARESTAS
@@ -70,4 +72,67 @@ def plot_confusion_matrix(y_true, y_pred):
     disp.plot(cmap=plt.cm.Blues)
     plt.show()
 
+def init_metrics():
+    metrics = {
+        'causal': {
+            'precision': [],
+            'recall': [],
+            'f1-score': []
+        },
+        'non_causal': {
+            'precision': [],
+            'recall': [],
+            'f1-score': []
+        },
+        'macro avg': {
+            'precision': [],
+            'recall': [],
+            'f1-score': []
+        },
+        'weighted avg': {
+            'precision': [],
+            'recall': [],
+            'f1-score': []
+        },
+        'accuracy': []
+    }
+    return metrics
+
+
+def save_values(metrics, values):
+    for key in metrics.keys():
+      if key == 'accuracy':
+        metrics[key].append(values[key])
+      else:
+        for key2 in metrics[key].keys():
+          metrics[key][key2].append(values[key][key2])
+
+def write_results(metrics, file_name, line_parameters, path):
+    if not Path(path + file_name).is_file():
+        file_ = open(path + file_name, 'w')
+        string = 'Parameters'
+        for key in metrics.keys():
+            if key == 'accuracy':
+              string += ';' + key + '-mean;' + key + '-std'
+            else:
+              for key2 in metrics[key].keys():
+                string += ';' + key + '_' + key2 + '-mean;' + key + '_' + key2 + '-std'
+
+        string += '\n'
+        file_.write(string)
+        file_.close()
+
+    file_ = open(path + file_name, 'a')
+    string = line_parameters
+
+    for key in metrics.keys():
+      if key == 'accuracy':
+        string += ';' + str(np.mean(metrics[key])) + ';' + str(np.std(metrics[key]))
+      else:
+        for key2 in metrics[key].keys():
+          string += ';' + str(np.mean(metrics[key][key2])) + ';' + str(np.std(metrics[key][key2]))
+
+    string += '\n'
+    file_.write(string)
+    file_.close()
 

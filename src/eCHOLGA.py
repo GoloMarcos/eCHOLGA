@@ -27,16 +27,10 @@ class Encoder_eCOLGCN(torch.nn.Module):
         self.data = dataHetero
         self.conv1 = GCNConv(input_len, 128)
         self.conv2 = GCNConv(128, dim)
-        # self.conv1 = GATv2Conv(input_len, 256, heads=4, concat=False)
-        # self.conv2 = GATv2Conv(256, dim, heads=4, concat=False)
-        # self.conv1 = FAConv(channels=input_len, eps=0.3, dropout=0.1, cached=True)
-        # self.conv2 = FAConv(channels=input_len, eps=0.3, dropout=0.1, cached=True)
-        # self.conv2_1 = nn.Linear(input_len, dim)
         self.encoder_layer_3 = nn.Linear(dim, num_node_types)
     def forward(self, x, edge_index):
         x1 = nn.Tanh()(self.conv1(x, edge_index))
         x2 = nn.Tanh()(self.conv2(x1, edge_index))
-        #x2 = nn.Tanh()(self.conv2_1(x2))
         return x2, self.encoder_layer_3(x2)
 
 class HeterogeneousGNNModel(object):
@@ -51,10 +45,10 @@ class HeterogeneousGNNModel(object):
         self.embedding_len = embedding_len
         self.graph_torch = from_networkx(self.graph).to(self.device)
         if dataHetero != None:
-            self.model = GAE(Encoder_eCHOLGA(self.embedding_len, self.learned_dimension, self.num_node_types, self.dataHetero)).to(self.device)
+            self.gnn_model = GAE(Encoder_eCHOLGA(self.embedding_len, self.learned_dimension, self.num_node_types, self.dataHetero)).to(self.device)
         else:
-            self.model = GAE(Encoder_eCOLGCN(self.embedding_len, self.learned_dimension, self.num_node_types, self.dataHetero)).to(self.device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+            self.gnn_model = GAE(Encoder_eCOLGCN(self.embedding_len, self.learned_dimension, self.num_node_types, self.dataHetero)).to(self.device)
+        self.optimizer = torch.optim.Adam(self.gnn_model.parameters(), lr=self.learning_rate)
         self.center = torch.Tensor([0] * self.learned_dimension).to(self.device)
         self.radius = torch.Tensor([self.radius_value]).to(self.device)
         self.mask = self._train_masking()
@@ -104,10 +98,12 @@ class HeterogeneousGNNModel(object):
         return self.learned_dimension
     def get_embedding_len(self):
         return self.embedding_len
+    def get_graph(self):
+        return self.graph
     def get_graph_torch(self):
         return self.graph_torch
-    def get_model(self):
-        return self.model
+    def get_gnn_model(self):
+        return self.gnn_model
     def get_optimizer(self):
         return self.optimizer
     def get_center(self):
