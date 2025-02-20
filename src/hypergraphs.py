@@ -191,6 +191,7 @@ class HeterogeneousHyperGraph(Hypergraph):
                 if json_obj['class'] == 'causal' or json_obj['class'] == 'non_causal': 
                     pseudo_labels.append(json_obj['class'])
             except: 
+                pseudo_labels.append('witout_PL')
                 l_out.append(i)
                 print(r)
 
