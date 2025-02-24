@@ -32,7 +32,8 @@ class GNNTrainer(object):
         loss_rec = self.heterogeneous_model.get_gnn_model().recon_loss(node_representation[relation_mask],relation_edge_index)
         loss_nt = nn.CrossEntropyLoss()(pred_node_type, torch.Tensor(node_type_labels).squeeze().long().to('cuda:0'))
         loss = loss_ocl * min(self.final_ocl_factor, ocl_factor)
-        loss = loss + (loss_rec * min(self.final_rec_factor, rec_factor))
+        if self.final_rec_factor != 0:
+            loss = loss + (loss_rec * min(self.final_rec_factor, rec_factor))
         loss = loss + (loss_nt * max(self.final_nt_factor, nt_factor))
         loss.backward()
         self.heterogeneous_model.get_optimizer().step()
