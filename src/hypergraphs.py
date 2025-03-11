@@ -4,7 +4,7 @@ import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 from sklearn.neighbors import kneighbors_graph
 from scipy.spatial.distance import cosine
-from src.pseudo_labels_generation import LLM_Heterogeneous_Graph_Information
+from pseudo_labels_generation import LLM_Heterogeneous_Graph_Information
 import json
 
 class Hypergraph(object):

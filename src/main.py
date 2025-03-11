@@ -92,13 +92,13 @@ Now, apply the same logic to the following event pairs.
     metrics = init_metrics()
 
     for g_fold in graphs_kfold:
-        het_hyperG.add_relation_edges_pseudo_labels(4, g_fold, args.llm, system_prompt, user_prompt)
-        heterogeneous_model = HeterogeneousGNNModel('cuda:0', args.lr, args.radius, 3, num_node_types, g_fold, 384)
-        gnn_trainer = GNNTrainer('cuda:0', args.n_epochs, heterogeneous_model, args.ocl_i, args.rec_i, args.nt_i, args.ocl_f, args.rec_f, args.nt_f, args.ocl_d, args.rec_d, args.nt_d, 100)
         np.random.seed(42)
         torch.manual_seed(42)
         random.seed(42)
         torch.cuda.manual_seed_all(42)
+        het_hyperG.add_relation_edges_pseudo_labels(4, g_fold, args.llm, system_prompt, user_prompt)
+        heterogeneous_model = HeterogeneousGNNModel('cuda:0', args.lr, args.radius, 3, num_node_types, g_fold, 384)
+        gnn_trainer = GNNTrainer('cuda:0', args.n_epochs, heterogeneous_model, args.ocl_i, args.rec_i, args.nt_i, args.ocl_f, args.rec_f, args.nt_f, args.ocl_d, args.rec_d, args.nt_d, 100)
         embs = gnn_trainer.train_model(False)
         y_true, y_pred, dic_metrics = gnn_trainer.predict(embs[-1])
         save_values(metrics, dic_metrics)

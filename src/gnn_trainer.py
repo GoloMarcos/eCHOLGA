@@ -1,6 +1,5 @@
 import torch.nn as nn
 import torch 
-import networkx as nx
 from eCHOLGA import HeterogeneousGNNModel
 from eCHOLGA import one_class_loss
 
@@ -33,8 +32,8 @@ class GNNTrainer(object):
         loss_nt = nn.CrossEntropyLoss()(pred_node_type, torch.Tensor(node_type_labels).squeeze().long().to('cuda:0'))
         loss = loss_ocl * min(self.final_ocl_factor, ocl_factor)
         if self.final_rec_factor != 0:
-            loss = loss + (loss_rec * min(self.final_rec_factor, rec_factor))
-        loss = loss + (loss_nt * max(self.final_nt_factor, nt_factor))
+            loss+= loss_rec * min(self.final_rec_factor, rec_factor)
+        loss+= loss_nt * max(self.final_nt_factor, nt_factor)
         loss.backward()
         self.heterogeneous_model.get_optimizer().step()
         return loss, loss_ocl, loss_rec, loss_nt, node_representation
